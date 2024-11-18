@@ -3,14 +3,18 @@ import os
 from pathlib import Path
 import argparse
 import torch
-from audio_upscaler.inference import AudioSR  # Assuming this is the correct import
 import soundfile as sf
 import numpy as np
 from torch2trt import TRTModule
 from trt_utils import convert_to_trt, save_trt_model, load_trt_model
+from audio_upscaler import upscale
+from audio_upscaler.predict import Predictor
 
 def extract_audio(input_file, temp_dir):
     """Extract audio from video file to WAV format"""
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"Input file not found: {input_file}")
+        
     audio_path = os.path.join(temp_dir, "extracted_audio.wav")
     cmd = [
         "ffmpeg", "-i", input_file,
@@ -20,13 +24,18 @@ def extract_audio(input_file, temp_dir):
         "-ac", "2",  # Stereo
         audio_path
     ]
-    subprocess.run(cmd, check=True)
-    return audio_path
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        return audio_path
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"FFmpeg failed: {e.stderr.decode()}")
 
 class AudioProcessor:
     def __init__(self, device="cuda"):
         self.device = device
-        self.model = AudioSR(device=device)
+        self.predictor = Predictor()
+        self.predictor.setup(model_name="basic", device=device)
+        self.model = self.predictor
         self.model_trt = None
         self.trt_path = "audiosr_trt.pth"
         
@@ -34,33 +43,62 @@ class AudioProcessor:
             self.setup_trt()
     
     def setup_trt(self):
-        """Setup TensorRT model"""
-        if os.path.exists(self.trt_path):
-            # Load existing TRT model
-            self.model_trt = TRTModule()
-            self.model_trt.load_state_dict(torch.load(self.trt_path))
-        else:
-            # Convert to TRT
-            print("Converting model to TensorRT...")
-            self.model_trt = convert_to_trt(self.model)
-            save_trt_model(self.model_trt, self.trt_path)
+        """Setup TensorRT model with proper error handling"""
+        if not torch.cuda.is_available():
+            print("CUDA not available, falling back to CPU")
+            return
+
+        try:
+            if os.path.exists(self.trt_path):
+                print("Loading existing TensorRT model...")
+                self.model_trt = load_trt_model(self.trt_path)
+            else:
+                print("Converting model to TensorRT...")
+                self.model_trt = convert_to_trt(self.model)
+                save_trt_model(self.model_trt, self.trt_path)
+        except Exception as e:
+            print(f"TensorRT conversion failed: {e}")
+            self.model_trt = None
     
-    def process_audio(self, audio):
-        """Process audio using TensorRT model"""
-        if self.model_trt is not None:
-            # Use TensorRT model
-            with torch.no_grad():
-                audio_tensor = torch.from_numpy(audio).to(self.device)
-                if len(audio.shape) == 1:
-                    audio_tensor = audio_tensor.unsqueeze(0)
-                processed = self.model_trt(audio_tensor).cpu().numpy()
-        else:
-            # Fallback to regular model
-            processed = self.model.enhance(audio)
-        return processed
+    def _process_chunk(self, chunk):
+        """Process a single chunk of audio"""
+        # Convert to tensor and move to device
+        chunk_tensor = torch.from_numpy(chunk).unsqueeze(0).to(self.device)
+        
+        # Process with TensorRT if available, otherwise use original model
+        with torch.no_grad():
+            if self.model_trt is not None:
+                try:
+                    processed = self.model_trt(chunk_tensor)
+                except Exception as e:
+                    print(f"TensorRT inference failed, falling back to original model: {e}")
+                    processed = self.model(chunk_tensor)
+            else:
+                processed = self.model(chunk_tensor)
+        
+        return processed.cpu().numpy().squeeze(0)
+    
+    def process_audio(self, audio, chunk_size=480000):
+        """Process audio in chunks to avoid memory issues"""
+        if audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+        
+        # Process in chunks if audio is too long
+        if audio.shape[-1] > chunk_size:
+            chunks = []
+            for i in range(0, audio.shape[-1], chunk_size):
+                chunk = audio[..., i:i + chunk_size]
+                processed_chunk = self._process_chunk(chunk)
+                chunks.append(processed_chunk)
+            return np.concatenate(chunks, axis=-1)
+        
+        return self._process_chunk(audio)
 
 def process_audio(input_audio_path, output_audio_path, processor):
-    """Modified process_audio function"""
+    """Process audio file"""
+    if not os.path.exists(input_audio_path):
+        raise FileNotFoundError(f"Input audio file not found: {input_audio_path}")
+    
     audio, sr = sf.read(input_audio_path)
     
     if audio.dtype != np.float32:
@@ -73,12 +111,20 @@ def process_audio(input_audio_path, output_audio_path, processor):
     else:
         processed_audio = processor.process_audio(audio)
     
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(output_audio_path), exist_ok=True)
     sf.write(output_audio_path, processed_audio, 48000)
 
 def remux_audio(input_video, processed_audio, output_file):
     """Remux processed audio with video"""
-    # Sony HT-A9 works best with high-bitrate TrueHD or DTS-HD MA
-    # Fallback to high-bitrate E-AC3 (DD+) if lossless isn't needed
+    if not os.path.exists(input_video):
+        raise FileNotFoundError(f"Input video not found: {input_video}")
+    if not os.path.exists(processed_audio):
+        raise FileNotFoundError(f"Processed audio not found: {processed_audio}")
+    
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    
     cmd = [
         "ffmpeg", "-i", input_video,
         "-i", processed_audio,
@@ -86,12 +132,15 @@ def remux_audio(input_video, processed_audio, output_file):
         "-c:a", "eac3",  # E-AC3 codec
         "-b:a", "1024k",  # High bitrate
         "-ar", "48000",  # 48kHz sampling
-        "-channel_layout", "5.1",  # 5.1 channel layout
+        "-channel_layout", "stereo",  # Changed to stereo for compatibility
         "-map", "0:v:0",  # Map video from first input
         "-map", "1:a:0",  # Map audio from second input
         output_file
     ]
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"FFmpeg remux failed: {e.stderr.decode()}")
 
 def main():
     parser = argparse.ArgumentParser(description="Upscale video audio using AudioSR with TensorRT")
@@ -122,6 +171,9 @@ def main():
 
         print(f"Processing complete! Output saved to: {args.output_file}")
 
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        raise
     finally:
         # Cleanup temp files
         if os.path.exists(args.temp_dir):
