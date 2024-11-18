@@ -24,12 +24,18 @@ AudioSR is a powerful tool designed to enhance the fidelity of your audio files,
 2. **Setup Environment**:
 
 ```bash
-conda create -n audiosr python=3.10
+conda create -n audiosr python=3.11
 conda activate audiosr
-conda install cudatoolkit=11.8 cudnn tensorrt ffmpeg -y
+conda install conda-forge::cudatoolkit
+conda install cudnn ffmpeg -y
 pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install -r requirements.txt
 pip install nvidia-pyindex nvidia-tensorrt
+
+# Install torch2trt
+git clone https://github.com/NVIDIA-AI-IOT/torch2trt
+cd torch2trt
+python setup.py install
 ```
 
 ## Usage
