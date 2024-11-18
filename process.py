@@ -145,9 +145,12 @@ def remux_audio(input_video, processed_audio, output_file):
 def main():
     parser = argparse.ArgumentParser(description="Upscale video audio using AudioSR with TensorRT")
     parser.add_argument("input_file", help="Input video file (mkv/mp4)")
-    parser.add_argument("output_file", help="Output video file")
     parser.add_argument("--temp_dir", default="temp", help="Temporary directory for processing")
     args = parser.parse_args()
+
+    # Create output filename
+    input_path = Path(args.input_file)
+    output_file = str(input_path.parent / f"{input_path.stem}_upscaleaudio{input_path.suffix}")
 
     # Create temp directory
     os.makedirs(args.temp_dir, exist_ok=True)
@@ -167,9 +170,9 @@ def main():
         
         # Remux
         print("Remuxing video...")
-        remux_audio(args.input_file, processed_audio, args.output_file)
+        remux_audio(args.input_file, processed_audio, output_file)
 
-        print(f"Processing complete! Output saved to: {args.output_file}")
+        print(f"Processing complete! Output saved to: {output_file}")
 
     except Exception as e:
         print(f"Error: {str(e)}")
