@@ -7,3 +7,7 @@ wget
 transformers==4.30.2
 tensorrt
 pycuda
+pydub
+soundfile
+numpy<=1.23.5
+librosa==0.9.2
