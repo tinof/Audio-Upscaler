@@ -3,6 +3,8 @@ import os
 
 from setuptools import find_packages, setup
 
+print(find_packages())
+
 # Package meta-data.
 NAME = "versatile-audio-upscaler"
 DESCRIPTION = "Versatile AI-driven audio upscaler to enhance the quality of any audio."
