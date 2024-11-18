@@ -9,3 +9,6 @@ torchaudio==2.0.2+cu118; sys_platform != 'darwin'
 torchaudio==2.0.2; sys_platform == 'darwin'
 wget
 transformers==4.30.2
+torch2trt
+tensorrt
+pycuda
